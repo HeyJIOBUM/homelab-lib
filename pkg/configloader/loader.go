@@ -57,29 +57,27 @@ func (l *Loader) Load(v any) error {
 }
 
 func groupByPriority(loaders []LoaderInterface) []map[string]LoaderInterface {
+	if len(loaders) == 0 {
+		return []map[string]LoaderInterface{}
+	}
+
 	sortedLoaders := make([]LoaderInterface, len(loaders))
 	copy(sortedLoaders, loaders)
 	sort.Slice(sortedLoaders, func(i, j int) bool {
-		return sortedLoaders[i].Priority() > sortedLoaders[j].Priority()
+		return sortedLoaders[i].Priority() < sortedLoaders[j].Priority()
 	})
 
-	firstPriorityGroup := make(map[string]LoaderInterface)
-	firstPriorityGroup[sortedLoaders[0].SupportedTag()] = sortedLoaders[0]
-	lastSavedPriority := sortedLoaders[0].Priority()
-
 	prioritizedLoaders := make([]map[string]LoaderInterface, 0)
-	prioritizedLoaders = append(prioritizedLoaders, firstPriorityGroup)
+	var currentGroup map[string]LoaderInterface
+	var currentPriority int
 
-	for i := 1; i < len(sortedLoaders); i++ {
-		curLoader := sortedLoaders[i]
-		if lastSavedPriority == curLoader.Priority() {
-			prioritizedLoaders[len(prioritizedLoaders)-1][curLoader.SupportedTag()] = curLoader
-		} else {
-			lastSavedPriority = curLoader.Priority()
-			newPriorityMap := make(map[string]LoaderInterface)
-			newPriorityMap[curLoader.SupportedTag()] = curLoader
-			prioritizedLoaders = append(prioritizedLoaders, newPriorityMap)
+	for i, loader := range sortedLoaders {
+		if i == 0 || loader.Priority() != currentPriority {
+			currentGroup = make(map[string]LoaderInterface)
+			currentPriority = loader.Priority()
+			prioritizedLoaders = append(prioritizedLoaders, currentGroup)
 		}
+		currentGroup[loader.SupportedTag()] = loader
 	}
 
 	return prioritizedLoaders
