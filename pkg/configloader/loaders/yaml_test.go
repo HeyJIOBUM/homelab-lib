@@ -33,12 +33,18 @@ ports:
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tmpFile.Name())
+	t.Cleanup(func() {
+		if err := os.Remove(tmpFile.Name()); err != nil {
+			t.Logf("Failed to remove temp file: %v", err)
+		}
+	})
 
 	if _, err := tmpFile.Write([]byte(yamlContent)); err != nil {
 		t.Fatal(err)
 	}
-	tmpFile.Close()
+	if err := tmpFile.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	loader, err := NewYamlLoader(tmpFile.Name())
 	if err != nil {
@@ -72,7 +78,7 @@ ports:
 		{
 			name:      "bool value",
 			tagValue:  "debug",
-			fieldType: reflect.TypeOf(false),
+			fieldType: reflect.TypeFor[bool](),
 			expected:  true,
 			wantOk:    true,
 			wantErr:   false,
@@ -96,7 +102,7 @@ ports:
 		{
 			name:      "slice of strings",
 			tagValue:  "features",
-			fieldType: reflect.TypeOf([]string{}),
+			fieldType: reflect.TypeFor[[]string](),
 			expected:  []string{"auth", "logging", "metrics"},
 			wantOk:    true,
 			wantErr:   false,
@@ -104,7 +110,7 @@ ports:
 		{
 			name:      "slice of ints",
 			tagValue:  "ports",
-			fieldType: reflect.TypeOf([]int{}),
+			fieldType: reflect.TypeFor[[]int](),
 			expected:  []int{8080, 8081, 8082},
 			wantOk:    true,
 			wantErr:   false,
@@ -169,12 +175,18 @@ func TestYamlLoader_InvalidYAML(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tmpFile.Name())
+	t.Cleanup(func() {
+		if err := os.Remove(tmpFile.Name()); err != nil {
+			t.Logf("Failed to remove temp file: %v", err)
+		}
+	})
 
 	if _, err := tmpFile.Write([]byte("invalid: yaml: [bad")); err != nil {
 		t.Fatal(err)
 	}
-	tmpFile.Close()
+	if err := tmpFile.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	_, err = NewYamlLoader(tmpFile.Name())
 	if err == nil {

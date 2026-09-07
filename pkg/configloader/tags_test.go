@@ -84,13 +84,9 @@ func TestTagResolver_ExtractTags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			type TestStruct struct {
-				Field string `json:"field"`
-			}
-
 			field := reflect.StructField{
 				Name: "Field",
-				Type: reflect.TypeOf(""),
+				Type: reflect.TypeFor[string](),
 				Tag:  reflect.StructTag(tt.tag),
 			}
 
