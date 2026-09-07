@@ -103,8 +103,13 @@ func (l *Loader) loadStruct(val reflect.Value, prefix string) error {
 			continue
 		}
 
-		if _, err := l.processField(fieldVal, field); err != nil {
+		ok, err := l.processField(fieldVal, field)
+		if err != nil {
 			return fmt.Errorf("field %s: %w", field.Name, err)
+		}
+
+		if !ok && l.strictMode {
+			return fmt.Errorf("field %s is not set while strict mode is enabled", field.Name)
 		}
 	}
 
