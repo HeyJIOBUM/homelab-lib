@@ -18,25 +18,67 @@ type VaultLoader struct {
 	supportedTag string
 	vaultConfig  VaultConfig
 	ctx          context.Context
-	client       *vault.Client
+	client       VaultClientInterface
 }
 
 type VaultConfig struct {
 	Address      string
-	RoleId       string
-	SecretId     string
+	RoleID       string
+	SecretID     string
 	SecretPath   string
-	AppRoleMount string // ?
-	Timeout      int    // ?
+	AppRoleMount string
+	Timeout      int
 	MaxRetries   int
 	RetryDelay   time.Duration
 }
 
-func NewVaultLoader(vaultConfig VaultConfig) *VaultLoader {
+func DefaultVaultConfig() VaultConfig {
+	return VaultConfig{
+		AppRoleMount: "approle",
+		Timeout:      30,
+		MaxRetries:   3,
+		RetryDelay:   100 * time.Millisecond,
+	}
+}
+
+func (c *VaultConfig) normalize() {
+	if c.AppRoleMount == "" {
+		c.AppRoleMount = "approle"
+	}
+	if c.Timeout < 0 {
+		c.Timeout = 30
+	}
+	if c.MaxRetries == 0 {
+		c.MaxRetries = 3
+	}
+	if c.RetryDelay == 0 {
+		c.RetryDelay = 100 * time.Millisecond
+	}
+}
+
+func NewVaultLoader(vaultConfig VaultConfig) (*VaultLoader, error) {
 	return NewVaultLoaderWithOptions("VaultLoader", 0, "vault", vaultConfig)
 }
 
-func NewVaultLoaderWithOptions(name string, priority int, supportedTag string, vaultConfig VaultConfig) *VaultLoader {
+func NewVaultLoaderWithOptions(name string, priority int, supportedTag string, vaultConfig VaultConfig) (*VaultLoader, error) {
+	vaultConfig.normalize()
+
+	if vaultConfig.Address == "" {
+		return nil, fmt.Errorf("vault address is required")
+	}
+
+	if vaultConfig.RoleID == "" || vaultConfig.SecretID == "" {
+		return nil, fmt.Errorf("vault role_id and secret_id are required")
+	}
+
+	if vaultConfig.SecretPath == "" {
+		return nil, fmt.Errorf("secret_path is required")
+	}
+
+	if vaultConfig.AppRoleMount == "" {
+		return nil, fmt.Errorf("auth mount path is required")
+	}
+
 	ctx := context.Background()
 
 	vaultLoader := &VaultLoader{
@@ -47,7 +89,7 @@ func NewVaultLoaderWithOptions(name string, priority int, supportedTag string, v
 		ctx:          ctx,
 	}
 
-	return vaultLoader
+	return vaultLoader, nil
 }
 
 func (vl *VaultLoader) Name() string         { return vl.name }
@@ -57,6 +99,10 @@ func (vl *VaultLoader) SupportedTag() string { return vl.supportedTag }
 func (vl *VaultLoader) LoadValue(tagValue string, field reflect.Value, structField reflect.StructField) (bool, error) {
 	if vl.client == nil {
 		return false, fmt.Errorf("connection is not initialized")
+	}
+
+	if tagValue == "" {
+		return false, nil
 	}
 
 	var retryErrors error
@@ -103,11 +149,11 @@ func (vl *VaultLoader) LoadValue(tagValue string, field reflect.Value, structFie
 }
 
 func (vl *VaultLoader) Connect() error {
-	if vl.vaultConfig.Address == "" {
-		return fmt.Errorf("vault address is required")
+	if vl.client != nil {
+		return vl.RefreshToken()
 	}
 
-	client, err := vault.New(
+	rawClient, err := vault.New(
 		vault.WithAddress(vl.vaultConfig.Address),
 		vault.WithRequestTimeout(time.Duration(vl.vaultConfig.Timeout)*time.Second),
 	)
@@ -115,28 +161,23 @@ func (vl *VaultLoader) Connect() error {
 		return fmt.Errorf("create vault client: %w", err)
 	}
 
-	vl.client = client
-	vl.RefreshToken()
+	vl.client = NewVaultClientAdapter(rawClient)
+	err = vl.RefreshToken()
+	if err != nil {
+		return fmt.Errorf("refreshing token: %w", err)
+	}
 
 	return nil
 }
 
 func (vl *VaultLoader) RefreshToken() error {
-	if vl.vaultConfig.RoleId == "" || vl.vaultConfig.SecretId == "" {
-		return fmt.Errorf("vault role_id and secret_id are required")
-	}
-
-	if vl.vaultConfig.AppRoleMount == "" {
-		return fmt.Errorf("auth mount path is required")
-	}
-
-	resp, err := vl.client.Auth.AppRoleLogin(
+	resp, err := vl.client.AppRoleLogin(
 		vl.ctx,
 		schema.AppRoleLoginRequest{
-			RoleId:   vl.vaultConfig.RoleId,
-			SecretId: vl.vaultConfig.SecretId,
+			RoleId:   vl.vaultConfig.RoleID,
+			SecretId: vl.vaultConfig.SecretID,
 		},
-		// vault.WithMountPath(vl.vaultConfig.AppRoleMount),
+		vault.WithMountPath(vl.vaultConfig.AppRoleMount),
 	)
 	if err != nil {
 		return fmt.Errorf("approle login: %w", err)
@@ -146,7 +187,10 @@ func (vl *VaultLoader) RefreshToken() error {
 		return fmt.Errorf("no auth response from Vault")
 	}
 
-	vl.client.SetToken(resp.Auth.ClientToken)
+	err = vl.client.SetToken(resp.Auth.ClientToken)
+	if err != nil {
+		return fmt.Errorf("set token: %w", err)
+	}
 
 	return nil
 }
