@@ -41,8 +41,8 @@ func (el *EnvLoader) LoadValue(tagValue string, field reflect.Value, structField
 		return false, nil
 	}
 
-	if err := setFieldValue(field, tagValue); err != nil {
-		return false, fmt.Errorf("Env loader: field %s: %w", structField.Name, err)
+	if err := setFieldValue(field, value); err != nil {
+		return false, fmt.Errorf("env loader: field %s: %w", structField.Name, err)
 	}
 
 	return true, nil
