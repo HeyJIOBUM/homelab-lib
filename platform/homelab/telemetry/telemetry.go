@@ -2,14 +2,15 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"time"
 
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/propagation"
-	"go.uber.org/multierr"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutlog"
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
@@ -17,31 +18,31 @@ import (
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 
+	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
+
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
+
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdkresource "go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
-	"go.opentelemetry.io/otel/trace"
-	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/HeyJIOBUM/homelab-lib/platform/homelab/configloader"
 )
 
 type Telemetry struct {
-	Tracer        trace.Tracer
-	Logger        *slog.Logger
 	LogProvider   *sdklog.LoggerProvider
 	TraceProvider *sdktrace.TracerProvider
 	MeterProvider *sdkmetric.MeterProvider
-	config        TelemetryConfig
+
+	config TelemetryConfig
 }
 
 type TelemetryConfig struct {
 	ServiceName    string
 	Environment    string
 	LogLevel       string
-	LogFormat      string
 	TraceEnabled   bool
 	MetricsEnabled bool
 	SamplingRate   float64
@@ -51,7 +52,6 @@ type TelemetryConfig struct {
 func DefaultConfig() TelemetryConfig {
 	return TelemetryConfig{
 		LogLevel:       "info",
-		LogFormat:      "json",
 		TraceEnabled:   false,
 		MetricsEnabled: false,
 		SamplingRate:   1.0,
@@ -62,7 +62,6 @@ func DefaultConfig() TelemetryConfig {
 func LoadConfig() TelemetryConfig {
 	return TelemetryConfig{
 		LogLevel:       getEnv("LOG_LEVEL", "info"),
-		LogFormat:      getEnv("LOG_FORMAT", "json"),
 		TraceEnabled:   getEnvBool("TRACE_ENABLED", false),
 		MetricsEnabled: getEnvBool("METRICS_ENABLED", false),
 		SamplingRate:   getEnvFloat("SAMPLING_RATE", 1.0),
@@ -84,63 +83,96 @@ func NewTelemetryWithConfig(appCfg configloader.HomelabAppConfig, cfg TelemetryC
 		semconv.DeploymentEnvironment(cfg.Environment),
 	)
 
-	logger, logProvider, err := newLogger(cfg, res)
+	t := &Telemetry{config: cfg}
+
+	logProvider, err := newLoggerProvider(cfg, res)
 	if err != nil {
 		return nil, fmt.Errorf("create logger: %w", err)
 	}
-
-	var tracer trace.Tracer
-	var traceProvider *sdktrace.TracerProvider
-	var meterProvider *sdkmetric.MeterProvider
+	t.LogProvider = logProvider
 
 	if cfg.TraceEnabled {
-		tracer, traceProvider, err = newTracer(res, cfg)
+		traceProvider, err := newTracerProvider(cfg, res)
 		if err != nil {
+			_ = t.Shutdown(context.Background())
 			return nil, fmt.Errorf("create tracer: %w", err)
 		}
-	} else {
-		tracer = tracenoop.NewTracerProvider().Tracer(cfg.ServiceName)
+		t.TraceProvider = traceProvider
 	}
 
 	if cfg.MetricsEnabled {
-		meterProvider, err = newMeter(res, cfg)
+		meterProvider, err := newMeterProvider(cfg, res)
 		if err != nil {
+			_ = t.Shutdown(context.Background())
 			return nil, fmt.Errorf("create meter: %w", err)
 		}
+		t.MeterProvider = meterProvider
 	}
 
-	return &Telemetry{
-		Logger:        logger,
-		LogProvider:   logProvider,
-		Tracer:        tracer,
-		TraceProvider: traceProvider,
-		MeterProvider: meterProvider,
-		config:        cfg,
-	}, nil
+	return t, nil
 }
 
-func newLogger(cfg TelemetryConfig, res *sdkresource.Resource) (*slog.Logger, *sdklog.LoggerProvider, error) {
-	var level slog.Level
-	switch cfg.LogLevel {
-	case "debug":
-		level = slog.LevelDebug
-	case "info":
-		level = slog.LevelInfo
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	default:
-		level = slog.LevelInfo
-	}
-	slog.SetLogLoggerLevel(level)
+func (t *Telemetry) NewLogger(scopeName string) *slog.Logger {
+	handler := otelslog.NewHandler(
+		scopeName,
+		otelslog.WithLoggerProvider(t.LogProvider),
+	)
 
+	var h slog.Handler = handler
+	level := parseLevel(t.config.LogLevel)
+	h = &levelHandler{next: h, level: level}
+
+	return slog.New(h)
+}
+
+func (t *Telemetry) NewMeter(scopeName string) metric.Meter {
+	if t.MeterProvider == nil {
+		return metricnoop.NewMeterProvider().Meter(scopeName)
+	}
+	return t.MeterProvider.Meter(scopeName)
+}
+
+func (t *Telemetry) NewTracer(scopeName string) trace.Tracer {
+	if t.TraceProvider == nil {
+		return tracenoop.NewTracerProvider().Tracer(scopeName)
+	}
+	return t.TraceProvider.Tracer(scopeName)
+}
+
+func (t *Telemetry) Shutdown(ctx context.Context) error {
+	var errs []error
+
+	if t.TraceProvider != nil {
+		if err := t.TraceProvider.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("trace: %w", err))
+		}
+		t.TraceProvider = nil
+	}
+
+	if t.MeterProvider != nil {
+		if err := t.MeterProvider.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("meter: %w", err))
+		}
+		t.MeterProvider = nil
+	}
+
+	if t.LogProvider != nil {
+		if err := t.LogProvider.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("log: %w", err))
+		}
+		t.LogProvider = nil
+	}
+
+	return errors.Join(errs...)
+}
+
+func newLoggerProvider(_ TelemetryConfig, res *sdkresource.Resource) (*sdklog.LoggerProvider, error) {
 	exporter, err := stdoutlog.New(
 		stdoutlog.WithPrettyPrint(),
 		stdoutlog.WithWriter(os.Stdout),
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create stdout log exporter: %w", err)
+		return nil, fmt.Errorf("create stdout log exporter: %w", err)
 	}
 
 	logProvider := sdklog.NewLoggerProvider(
@@ -148,21 +180,16 @@ func newLogger(cfg TelemetryConfig, res *sdkresource.Resource) (*slog.Logger, *s
 		sdklog.WithResource(res),
 	)
 
-	logger := slog.New(otelslog.NewHandler(
-		cfg.ServiceName,
-		otelslog.WithLoggerProvider(logProvider),
-	))
-
-	return logger, logProvider, nil
+	return logProvider, nil
 }
 
-func newTracer(res *sdkresource.Resource, cfg TelemetryConfig) (trace.Tracer, *sdktrace.TracerProvider, error) {
+func newTracerProvider(cfg TelemetryConfig, res *sdkresource.Resource) (*sdktrace.TracerProvider, error) {
 	exporter, err := stdouttrace.New(
 		stdouttrace.WithPrettyPrint(),
 		stdouttrace.WithWriter(os.Stdout),
 	)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	provider := sdktrace.NewTracerProvider(
@@ -171,13 +198,10 @@ func newTracer(res *sdkresource.Resource, cfg TelemetryConfig) (trace.Tracer, *s
 		sdktrace.WithSampler(sdktrace.TraceIDRatioBased(cfg.SamplingRate)),
 	)
 
-	otel.SetTracerProvider(provider)
-	otel.SetTextMapPropagator(propagation.TraceContext{})
-
-	return otel.Tracer(cfg.ServiceName), provider, nil
+	return provider, nil
 }
 
-func newMeter(res *sdkresource.Resource, cfg TelemetryConfig) (*sdkmetric.MeterProvider, error) {
+func newMeterProvider(cfg TelemetryConfig, res *sdkresource.Resource) (*sdkmetric.MeterProvider, error) {
 	exporter, err := stdoutmetric.New(
 		stdoutmetric.WithPrettyPrint(),
 		stdoutmetric.WithWriter(os.Stdout),
@@ -193,32 +217,43 @@ func newMeter(res *sdkresource.Resource, cfg TelemetryConfig) (*sdkmetric.MeterP
 		sdkmetric.WithResource(res),
 	)
 
-	otel.SetMeterProvider(provider)
 	return provider, nil
 }
 
-func (t *Telemetry) Shutdown(ctx context.Context) error {
-	var errs error
+type levelHandler struct {
+	next  slog.Handler
+	level slog.Level
+}
 
-	if t.TraceProvider != nil {
-		if err := t.TraceProvider.Shutdown(ctx); err != nil {
-			errs = multierr.Append(errs, fmt.Errorf("trace: %w", err))
-		}
+func (h *levelHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return level >= h.level && h.next.Enabled(ctx, level)
+}
+
+func (h *levelHandler) Handle(ctx context.Context, r slog.Record) error {
+	return h.next.Handle(ctx, r)
+}
+
+func (h *levelHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &levelHandler{next: h.next.WithAttrs(attrs), level: h.level}
+}
+
+func (h *levelHandler) WithGroup(name string) slog.Handler {
+	return &levelHandler{next: h.next.WithGroup(name), level: h.level}
+}
+
+func parseLevel(s string) slog.Level {
+	switch s {
+	case "debug":
+		return slog.LevelDebug
+	case "info":
+		return slog.LevelInfo
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
 	}
-
-	if t.MeterProvider != nil {
-		if err := t.MeterProvider.Shutdown(ctx); err != nil {
-			errs = multierr.Append(errs, fmt.Errorf("meter: %w", err))
-		}
-	}
-
-	if t.LogProvider != nil {
-		if err := t.LogProvider.Shutdown(ctx); err != nil {
-			errs = multierr.Append(errs, fmt.Errorf("log: %w", err))
-		}
-	}
-
-	return errs
 }
 
 func getEnv(key, defaultValue string) string {
@@ -237,9 +272,9 @@ func getEnvBool(key string, defaultValue bool) bool {
 
 func getEnvFloat(key string, defaultValue float64) float64 {
 	if val := os.Getenv(key); val != "" {
-		var v float64
-		fmt.Sscanf(val, "%f", &v)
-		return v
+		if v, err := strconv.ParseFloat(val, 64); err == nil {
+			return v
+		}
 	}
 	return defaultValue
 }
