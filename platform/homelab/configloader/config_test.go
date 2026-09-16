@@ -2,6 +2,7 @@ package configloader
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -92,10 +93,11 @@ func TestLoadHomelabAppConfig(t *testing.T) {
 
 func TestLoadVaultConfig(t *testing.T) {
 	tests := []struct {
-		name    string
-		env     map[string]string
-		envFile string
-		wantErr bool
+		name      string
+		envFile   string
+		wantErr   bool
+		wantMount string
+		wantSvc   string
 	}{
 		{
 			name: "all vault env vars set via env file",
@@ -103,16 +105,20 @@ func TestLoadVaultConfig(t *testing.T) {
 VAULT_ADDR=http://vault:8200
 VAULT_ROLE_ID=role-123
 VAULT_SECRET_ID=secret-456
-VAULT_SECRET_PATH=secret/data/dev/myapp
+VAULT_SECRET_MOUNT_PATH=secret/data/dev
+VAULT_SECRET_SERVICE_PATH=services/myapp
 `,
-			wantErr: false,
+			wantErr:   false,
+			wantMount: "secret/data/dev",
+			wantSvc:   "services/myapp",
 		},
 		{
 			name: "missing VAULT_ADDR",
 			envFile: `
 VAULT_ROLE_ID=role-123
 VAULT_SECRET_ID=secret-456
-VAULT_SECRET_PATH=secret/data/dev/myapp
+VAULT_SECRET_MOUNT_PATH=secret/data/dev
+VAULT_SECRET_SERVICE_PATH=services/myapp
 `,
 			wantErr: true,
 		},
@@ -121,7 +127,38 @@ VAULT_SECRET_PATH=secret/data/dev/myapp
 			envFile: `
 VAULT_ADDR=http://vault:8200
 VAULT_SECRET_ID=secret-456
-VAULT_SECRET_PATH=secret/data/dev/myapp
+VAULT_SECRET_MOUNT_PATH=secret/data/dev
+VAULT_SECRET_SERVICE_PATH=services/myapp
+`,
+			wantErr: true,
+		},
+		{
+			name: "missing VAULT_SECRET_ID",
+			envFile: `
+VAULT_ADDR=http://vault:8200
+VAULT_ROLE_ID=role-123
+VAULT_SECRET_MOUNT_PATH=secret/data/dev
+VAULT_SECRET_SERVICE_PATH=services/myapp
+`,
+			wantErr: true,
+		},
+		{
+			name: "missing VAULT_SECRET_MOUNT_PATH",
+			envFile: `
+VAULT_ADDR=http://vault:8200
+VAULT_ROLE_ID=role-123
+VAULT_SECRET_ID=secret-456
+VAULT_SECRET_SERVICE_PATH=services/myapp
+`,
+			wantErr: true,
+		},
+		{
+			name: "missing VAULT_SECRET_SERVICE_PATH",
+			envFile: `
+VAULT_ADDR=http://vault:8200
+VAULT_ROLE_ID=role-123
+VAULT_SECRET_ID=secret-456
+VAULT_SECRET_MOUNT_PATH=secret/data/dev
 `,
 			wantErr: true,
 		},
@@ -129,10 +166,6 @@ VAULT_SECRET_PATH=secret/data/dev/myapp
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			for k, v := range tt.env {
-				t.Setenv(k, v)
-			}
-
 			var paths []string
 
 			if tt.envFile != "" {
@@ -172,8 +205,46 @@ VAULT_SECRET_PATH=secret/data/dev/myapp
 				if cfg.RetryDelay <= 0 {
 					t.Error("RetryDelay should have default value")
 				}
+				if cfg.SecretMountPath != tt.wantMount {
+					t.Errorf("SecretMountPath: expected %q, got %q", tt.wantMount, cfg.SecretMountPath)
+				}
+				if cfg.SecretServicePath != tt.wantSvc {
+					t.Errorf("SecretServicePath: expected %q, got %q", tt.wantSvc, cfg.SecretServicePath)
+				}
 			}
 		})
+	}
+}
+
+func TestLoadVaultConfig_MultipleErrors(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "test_*.env")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.Write([]byte("")); err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+
+	_, err = LoadVaultConfig(tmpFile.Name())
+	if err == nil {
+		t.Fatal("Expected error, got nil")
+	}
+
+	errStr := err.Error()
+	expectedFields := []string{
+		"VAULT_ADDR",
+		"VAULT_ROLE_ID",
+		"VAULT_SECRET_ID",
+		"VAULT_SECRET_MOUNT_PATH",
+		"VAULT_SECRET_SERVICE_PATH",
+	}
+	for _, field := range expectedFields {
+		if !strings.Contains(errStr, field) {
+			t.Errorf("Error should mention %s, got: %s", field, errStr)
+		}
 	}
 }
 
@@ -291,7 +362,8 @@ func TestNewHomelabConfigLoader(t *testing.T) {
 VAULT_ADDR=http://vault:8200
 VAULT_ROLE_ID=role-123
 VAULT_SECRET_ID=secret-456
-VAULT_SECRET_PATH=secret/data/dev/myapp
+VAULT_SECRET_MOUNT_PATH=secret/data/dev
+VAULT_SECRET_SERVICE_PATH=services/myapp
 `
 	tmpFile, err := os.CreateTemp("", "test_*.env")
 	if err != nil {

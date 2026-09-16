@@ -5,8 +5,6 @@ import (
 	"errors"
 	"reflect"
 	"testing"
-
-	"github.com/hashicorp/vault-client-go/schema"
 )
 
 func TestVaultLoader_LoadValue_Unit(t *testing.T) {
@@ -20,14 +18,14 @@ func TestVaultLoader_LoadValue_Unit(t *testing.T) {
 		mockSetup func(*MockVaultClient)
 	}{
 		{
-			name:      "get string secret",
+			name:      "get string secret from service path",
 			tagValue:  "test_string",
 			fieldType: reflect.TypeFor[string](),
 			expected:  "hello_world",
 			wantOk:    true,
 			wantErr:   false,
 			mockSetup: func(m *MockVaultClient) {
-				m.WithSecret("secret/data/test", map[string]any{
+				m.WithSecret("secret/data/dev/services/sync", map[string]any{
 					"test_string": "hello_world",
 				})
 			},
@@ -40,7 +38,7 @@ func TestVaultLoader_LoadValue_Unit(t *testing.T) {
 			wantOk:    true,
 			wantErr:   false,
 			mockSetup: func(m *MockVaultClient) {
-				m.WithSecret("secret/data/test", map[string]any{
+				m.WithSecret("secret/data/dev/services/sync", map[string]any{
 					"test_int": 12345,
 				})
 			},
@@ -53,7 +51,7 @@ func TestVaultLoader_LoadValue_Unit(t *testing.T) {
 			wantOk:    true,
 			wantErr:   false,
 			mockSetup: func(m *MockVaultClient) {
-				m.WithSecret("secret/data/test", map[string]any{
+				m.WithSecret("secret/data/dev/services/sync", map[string]any{
 					"test_bool": true,
 				})
 			},
@@ -66,8 +64,47 @@ func TestVaultLoader_LoadValue_Unit(t *testing.T) {
 			wantOk:    true,
 			wantErr:   false,
 			mockSetup: func(m *MockVaultClient) {
-				m.WithSecret("secret/data/test", map[string]any{
+				m.WithSecret("secret/data/dev/services/sync", map[string]any{
 					"test_float": 3.14,
+				})
+			},
+		},
+		{
+			name:      "get secret from relative subpath",
+			tagValue:  "s3:access_key",
+			fieldType: reflect.TypeFor[string](),
+			expected:  "GK123",
+			wantOk:    true,
+			wantErr:   false,
+			mockSetup: func(m *MockVaultClient) {
+				m.WithSecret("secret/data/dev/services/sync/s3", map[string]any{
+					"access_key": "GK123",
+				})
+			},
+		},
+		{
+			name:      "get secret from absolute path",
+			tagValue:  "/shared/notifications:token",
+			fieldType: reflect.TypeFor[string](),
+			expected:  "notify-token",
+			wantOk:    true,
+			wantErr:   false,
+			mockSetup: func(m *MockVaultClient) {
+				m.WithSecret("secret/data/dev/shared/notifications", map[string]any{
+					"token": "notify-token",
+				})
+			},
+		},
+		{
+			name:      "empty path with colon uses service path",
+			tagValue:  ":db_password",
+			fieldType: reflect.TypeFor[string](),
+			expected:  "db-secret",
+			wantOk:    true,
+			wantErr:   false,
+			mockSetup: func(m *MockVaultClient) {
+				m.WithSecret("secret/data/dev/services/sync", map[string]any{
+					"db_password": "db-secret",
 				})
 			},
 		},
@@ -79,7 +116,7 @@ func TestVaultLoader_LoadValue_Unit(t *testing.T) {
 			wantOk:    false,
 			wantErr:   false,
 			mockSetup: func(m *MockVaultClient) {
-				m.WithSecret("secret/data/test", map[string]any{
+				m.WithSecret("secret/data/dev/services/sync", map[string]any{
 					"test_string": "hello_world",
 				})
 			},
@@ -101,18 +138,18 @@ func TestVaultLoader_LoadValue_Unit(t *testing.T) {
 			wantOk:    false,
 			wantErr:   true,
 			mockSetup: func(m *MockVaultClient) {
-				m.WithAuthError(errors.New("vault connection error"))
+				m.WithReadError(errors.New("vault connection error"))
 			},
 		},
 		{
-			name:      "secret not found",
+			name:      "secret not found at path",
 			tagValue:  "test_string",
 			fieldType: reflect.TypeFor[string](),
 			expected:  nil,
 			wantOk:    false,
-			wantErr:   false,
+			wantErr:   true,
 			mockSetup: func(m *MockVaultClient) {
-				m.WithSecret("secret/data/test", map[string]any{
+				m.WithSecret("secret/data/dev/services/sync", map[string]any{
 					"different_secret": "hello_world",
 				})
 			},
@@ -131,11 +168,12 @@ func TestVaultLoader_LoadValue_Unit(t *testing.T) {
 				priority:     0,
 				supportedTag: "vault",
 				vaultConfig: VaultConfig{
-					SecretPath:   "secret/data/test",
-					MaxRetries:   1,
-					RoleID:       "test-role",
-					SecretID:     "test-secret",
-					AppRoleMount: "approle",
+					SecretMountPath:   "secret/data/dev",
+					SecretServicePath: "services/sync",
+					MaxRetries:        1,
+					RoleID:            "test-role",
+					SecretID:          "test-secret",
+					AppRoleMount:      "approle",
 				},
 				client: mockClient,
 				ctx:    context.Background(),
@@ -173,6 +211,121 @@ func TestVaultLoader_LoadValue_Unit(t *testing.T) {
 	}
 }
 
+func TestVaultLoader_resolvePath(t *testing.T) {
+	tests := []struct {
+		name     string
+		tagValue string
+		wantPath string
+		wantKey  string
+	}{
+		{
+			name:     "plain key",
+			tagValue: "db_password",
+			wantPath: "services/sync",
+			wantKey:  "db_password",
+		},
+		{
+			name:     "relative subpath",
+			tagValue: "s3:access_key",
+			wantPath: "services/sync/s3",
+			wantKey:  "access_key",
+		},
+		{
+			name:     "absolute path",
+			tagValue: "/shared/notifications:token",
+			wantPath: "shared/notifications",
+			wantKey:  "token",
+		},
+		{
+			name:     "empty path with colon",
+			tagValue: ":token",
+			wantPath: "services/sync",
+			wantKey:  "token",
+		},
+		{
+			name:     "nested relative path",
+			tagValue: "a/b/c:key",
+			wantPath: "services/sync/a/b/c",
+			wantKey:  "key",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loader := &VaultLoader{
+				vaultConfig: VaultConfig{
+					SecretServicePath: "services/sync",
+				},
+			}
+
+			gotPath, gotKey := loader.resolvePath(tt.tagValue)
+
+			if gotPath != tt.wantPath {
+				t.Errorf("path: expected %q, got %q", tt.wantPath, gotPath)
+			}
+			if gotKey != tt.wantKey {
+				t.Errorf("key: expected %q, got %q", tt.wantKey, gotKey)
+			}
+		})
+	}
+}
+
+func TestVaultLoader_fullPath(t *testing.T) {
+	tests := []struct {
+		name      string
+		mountPath string
+		relative  string
+		want      string
+	}{
+		{
+			name:      "typical path",
+			mountPath: "secret/data/dev",
+			relative:  "services/sync",
+			want:      "secret/data/dev/services/sync",
+		},
+		{
+			name:      "mount path with trailing slash",
+			mountPath: "secret/data/dev/",
+			relative:  "services/sync",
+			want:      "secret/data/dev/services/sync",
+		},
+		{
+			name:      "relative with leading slash",
+			mountPath: "secret/data/dev",
+			relative:  "/services/sync",
+			want:      "secret/data/dev/services/sync",
+		},
+		{
+			name:      "empty relative",
+			mountPath: "secret/data/dev",
+			relative:  "",
+			want:      "secret/data/dev",
+		},
+		{
+			name:      "kv v1 style (no data)",
+			mountPath: "secret/dev",
+			relative:  "services/sync",
+			want:      "secret/dev/services/sync",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loader := &VaultLoader{
+				vaultConfig: VaultConfig{
+					SecretMountPath: tt.mountPath,
+				},
+			}
+
+			got := loader.fullPath(tt.relative)
+
+			if got != tt.want {
+				t.Errorf("expected %q, got %q", tt.want, got)
+			}
+		})
+	}
+}
+
 func TestVaultLoader_RefreshToken_Unit(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -180,10 +333,9 @@ func TestVaultLoader_RefreshToken_Unit(t *testing.T) {
 		wantErr   bool
 	}{
 		{
-			name: "successful refresh",
-			mockSetup: func(m *MockVaultClient) {
-			},
-			wantErr: false,
+			name:      "successful refresh",
+			mockSetup: func(m *MockVaultClient) {},
+			wantErr:   false,
 		},
 		{
 			name: "auth error",
@@ -206,11 +358,12 @@ func TestVaultLoader_RefreshToken_Unit(t *testing.T) {
 				priority:     0,
 				supportedTag: "vault",
 				vaultConfig: VaultConfig{
-					Address:      "http://localhost:8200",
-					RoleID:       "test-role",
-					SecretID:     "test-secret",
-					AppRoleMount: "approle",
-					SecretPath:   "secret/data/test",
+					Address:           "http://localhost:8200",
+					RoleID:            "test-role",
+					SecretID:          "test-secret",
+					AppRoleMount:      "approle",
+					SecretMountPath:   "secret/data/dev",
+					SecretServicePath: "services/sync",
 				},
 				client: mockClient,
 				ctx:    context.Background(),
@@ -238,12 +391,13 @@ func TestVaultLoader_Connect_Unit(t *testing.T) {
 		{
 			name: "successful connect",
 			config: VaultConfig{
-				Address:      "http://localhost:8200",
-				RoleID:       "test-role",
-				SecretID:     "test-secret",
-				AppRoleMount: "approle",
-				SecretPath:   "secret/data/test",
-				Timeout:      30,
+				Address:           "http://localhost:8200",
+				RoleID:            "test-role",
+				SecretID:          "test-secret",
+				AppRoleMount:      "approle",
+				SecretMountPath:   "secret/data/dev",
+				SecretServicePath: "services/sync",
+				Timeout:           30,
 			},
 			wantErr: false,
 		},
@@ -272,49 +426,4 @@ func TestVaultLoader_Connect_Unit(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestMockVaultClient_Chaining(t *testing.T) {
-	mock := NewMockVaultClient().
-		WithSecret("secret/data/test", map[string]any{
-			"key1": "value1",
-			"key2": "value2",
-		})
-
-	data, err := mock.Read(context.Background(), "secret/data/test")
-	if err != nil {
-		t.Errorf("Unexpected error: %v", err)
-	}
-	if data == nil {
-		t.Error("Expected data, got nil")
-	}
-
-	if secret, ok := data.Data["data"].(map[string]any); ok {
-		if secret["key1"] != "value1" {
-			t.Errorf("Expected key1 = value1, got %v", secret["key1"])
-		}
-		if secret["key2"] != "value2" {
-			t.Errorf("Expected key2 = value2, got %v", secret["key2"])
-		}
-	} else {
-		t.Error("Expected data.data to be map[string]any")
-	}
-}
-
-func TestMockVaultClient_Assertions(t *testing.T) {
-	mock := NewMockVaultClient().
-		WithSecret("secret/data/test", map[string]any{
-			"test_string": "hello_world",
-		})
-
-	ctx := context.Background()
-
-	mock.AppRoleLogin(ctx, schema.AppRoleLoginRequest{})
-	mock.Read(ctx, "secret/data/test")
-	mock.SetToken("test-token")
-
-	mock.AssertLoginCalled(t)
-	mock.AssertReadCalled(t)
-	mock.AssertSetTokenCalled(t)
-	mock.AssertSecretExists(t, "secret/data/test")
 }

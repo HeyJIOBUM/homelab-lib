@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/vault-client-go"
@@ -22,14 +23,15 @@ type VaultLoader struct {
 }
 
 type VaultConfig struct {
-	Address      string
-	RoleID       string
-	SecretID     string
-	SecretPath   string
-	AppRoleMount string
-	Timeout      int
-	MaxRetries   int
-	RetryDelay   time.Duration
+	Address           string
+	RoleID            string
+	SecretID          string
+	SecretMountPath   string
+	SecretServicePath string
+	AppRoleMount      string
+	Timeout           int
+	MaxRetries        int
+	RetryDelay        time.Duration
 }
 
 func DefaultVaultConfig() VaultConfig {
@@ -71,8 +73,12 @@ func NewVaultLoaderWithOptions(name string, priority int, supportedTag string, v
 		return nil, fmt.Errorf("vault role_id and secret_id are required")
 	}
 
-	if vaultConfig.SecretPath == "" {
-		return nil, fmt.Errorf("secret_path is required")
+	if vaultConfig.SecretMountPath == "" {
+		return nil, fmt.Errorf("secret_mount_path is required")
+	}
+
+	if vaultConfig.SecretServicePath == "" {
+		return nil, fmt.Errorf("secret_service_path is required")
 	}
 
 	if vaultConfig.AppRoleMount == "" {
@@ -100,28 +106,29 @@ func (vl *VaultLoader) LoadValue(tagValue string, field reflect.Value, structFie
 	if vl.client == nil {
 		return false, fmt.Errorf("connection is not initialized")
 	}
-
 	if tagValue == "" {
 		return false, nil
 	}
 
+	resolvedPath, key := vl.resolvePath(tagValue)
+	vaultPath := vl.fullPath(resolvedPath)
+
 	var retryErrors error
 
 	for attempt := 0; attempt < vl.vaultConfig.MaxRetries; attempt++ {
-
-		serviceSecrets, err := vl.client.Read(vl.ctx, vl.vaultConfig.SecretPath)
+		secrets, err := vl.client.Read(vl.ctx, vaultPath)
 		if err == nil {
-			data, ok := serviceSecrets.Data["data"].(map[string]any)
+			data, ok := secrets.Data["data"].(map[string]any)
 			if !ok {
-				return false, fmt.Errorf("invalid secret data format")
+				return false, fmt.Errorf("invalid secret data format at %s", vaultPath)
 			}
 
-			secret, ok := data[tagValue]
+			value, ok := data[key]
 			if !ok {
 				return false, nil
 			}
 
-			if err := setFieldValueFromInterface(field, secret); err != nil {
+			if err := setFieldValueFromInterface(field, value); err != nil {
 				return false, err
 			}
 			return true, nil
@@ -146,6 +153,36 @@ func (vl *VaultLoader) LoadValue(tagValue string, field reflect.Value, structFie
 	}
 
 	return false, fmt.Errorf("max retries exceeded: %w", retryErrors)
+}
+
+func (vl *VaultLoader) resolvePath(tagValue string) (string, string) {
+	pathPart, key, hasPath := strings.Cut(tagValue, ":")
+
+	if !hasPath {
+		return vl.vaultConfig.SecretServicePath, tagValue
+	}
+
+	switch {
+	case strings.HasPrefix(pathPart, "/"):
+		return strings.TrimPrefix(pathPart, "/"), key
+	case pathPart == "":
+		return vl.vaultConfig.SecretServicePath, key
+	default:
+		return strings.TrimSuffix(vl.vaultConfig.SecretServicePath, "/") + "/" + pathPart, key
+	}
+}
+
+func (vl *VaultLoader) fullPath(relative string) string {
+	base := strings.Trim(vl.vaultConfig.SecretMountPath, "/")
+	rel := strings.Trim(relative, "/")
+
+	if rel == "" {
+		return base
+	}
+	if base == "" {
+		return rel
+	}
+	return base + "/" + rel
 }
 
 func (vl *VaultLoader) Connect() error {

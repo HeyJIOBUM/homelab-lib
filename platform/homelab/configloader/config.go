@@ -89,7 +89,8 @@ func LoadVaultConfig(envPaths ...string) (loaders.VaultConfig, error) {
 	cfg.Address = envMap["VAULT_ADDR"]
 	cfg.RoleID = envMap["VAULT_ROLE_ID"]
 	cfg.SecretID = envMap["VAULT_SECRET_ID"]
-	cfg.SecretPath = envMap["VAULT_SECRET_PATH"]
+	cfg.SecretMountPath = envMap["VAULT_SECRET_MOUNT_PATH"]
+	cfg.SecretServicePath = envMap["VAULT_SECRET_SERVICE_PATH"]
 
 	var errors error
 	if cfg.Address == "" {
@@ -101,8 +102,11 @@ func LoadVaultConfig(envPaths ...string) (loaders.VaultConfig, error) {
 	if cfg.SecretID == "" {
 		errors = multierr.Append(errors, fmt.Errorf("VAULT_SECRET_ID is required"))
 	}
-	if cfg.SecretPath == "" {
-		errors = multierr.Append(errors, fmt.Errorf("VAULT_SECRET_PATH is required"))
+	if cfg.SecretMountPath == "" {
+		errors = multierr.Append(errors, fmt.Errorf("VAULT_SECRET_MOUNT_PATH is required"))
+	}
+	if cfg.SecretServicePath == "" {
+		errors = multierr.Append(errors, fmt.Errorf("VAULT_SECRET_SERVICE_PATH is required"))
 	}
 
 	if errors != nil {
